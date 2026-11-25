@@ -1,0 +1,7 @@
+program
+*.o
+build/
+obj/
+solution.tar.gz
+*.log
+*.wal
