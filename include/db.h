@@ -18,7 +18,12 @@
     typedef struct db
     {
         table_t table; /* Tabela hash com as contas (sem sincronização). */
-        wal_t *wal;    /* Referência para o log.                          */
+        wal_t *wal;    /* Referência para o log.                        */
+        pthread_mutex_t **mutex_escrita;
+        pthread_mutex_t **mutex_leitores;
+        pthread_mutex_t **catraca;
+        pthread_mutex_t snapshot_pendente;
+        int **readers;
 
         /* TODO: Adicione aqui os atributos que achar necessários para implementar o
         comportamento do banco. Esses atributos deverão ser usados pelas funções

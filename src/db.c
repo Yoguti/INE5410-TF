@@ -11,6 +11,7 @@
 #include <stdlib.h>
 #include "db.h"
 
+
 void db_init(db_t *self, wal_t *wal)
 {
     /* Cria as contas (NÃO ALTERE!). */
@@ -23,6 +24,21 @@ void db_init(db_t *self, wal_t *wal)
     }
 
     /* TODO: Adicionar código aqui se necessário! */
+    self->mutex_leitores = malloc(config.partitions * sizeof(pthread_mutex_t *));
+    self->mutex_escrita = malloc(config.partitions * sizeof(pthread_mutex_t *));
+    self->catraca = malloc(config.partitions * sizeof(pthread_mutex_t *));
+    self->readers = malloc(config.partitions * sizeof(int *));
+    for(int i = 0; i < config.partitions; i++){
+        self->mutex_leitores[i] = malloc(sizeof(pthread_mutex_t));
+        self->mutex_escrita[i] = malloc(sizeof(pthread_mutex_t));
+        self->catraca[i] = malloc(sizeof(pthread_mutex_t));
+        self->readers[i] = malloc(sizeof(int));
+        *self->readers[i] = 0;
+        pthread_mutex_init(self->mutex_leitores[i], NULL);
+        pthread_mutex_init(self->mutex_escrita[i], NULL);
+        pthread_mutex_init(self->catraca[i], NULL);
+    }
+    pthread_mutex_init(&self->snapshot_pendente, NULL);
 
     plog("[db] Initialized\n");
 }
@@ -30,6 +46,20 @@ void db_init(db_t *self, wal_t *wal)
 void db_finalize(db_t *self)
 {
     /* TODO: Adicionar código aqui se necessário! */
+    for(int i = 0; i < config.partitions; i++){
+        pthread_mutex_destroy(self->mutex_leitores[i]);
+        pthread_mutex_destroy(self->mutex_escrita[i]);
+        pthread_mutex_destroy(self->catraca[i]);
+        free(self->mutex_leitores[i]);
+        free(self->mutex_escrita[i]);
+        free(self->catraca[i]);
+        free(self->readers[i]);
+    }
+    pthread_mutex_destroy(&self->snapshot_pendente);
+    free(self->mutex_escrita);
+    free(self->mutex_leitores);
+    free(self->catraca);
+    free(self->readers);
 
     table_finalize(&self->table);
     plog("[db] Finalized\n");
@@ -37,32 +67,108 @@ void db_finalize(db_t *self)
 
 void db_acquire_read(db_t *self, const char *key)
 {
-    /* TODO: Implementar! */
+    unsigned int particao = db_partition_of(self, key);
+    pthread_mutex_lock(self->catraca[particao]);
+    pthread_mutex_unlock(self->catraca[particao]);
+
+    pthread_mutex_lock(self->mutex_leitores[particao]);
+    (*self->readers[particao])++;
+    if((*self->readers[particao]) == 1){
+        pthread_mutex_lock(self->mutex_escrita[particao]);
+    }
+    pthread_mutex_unlock(self->mutex_leitores[particao]);
 }
 
 void db_release_read(db_t *self, const char *key)
 {
-    /* TODO: Implementar! */
+    unsigned int particao = db_partition_of(self, key);
+    pthread_mutex_lock(self->mutex_leitores[particao]);
+    (*self->readers[particao])--;
+    if((*self->readers[particao]) == 0){
+        pthread_mutex_unlock(self->mutex_escrita[particao]);
+    }
+    pthread_mutex_unlock(self->mutex_leitores[particao]);
+
 }
 
 void db_acquire_pair(db_t *self, const char *from, const char *to)
 {
-    /* TODO: Implementar! */
+    unsigned int particao_from = db_partition_of(self, from);
+    unsigned int particao_to = db_partition_of(self, to);
+    
+    pthread_mutex_lock(&self->snapshot_pendente);
+    pthread_mutex_unlock(&self->snapshot_pendente);
+
+    if(particao_from < particao_to){
+        pthread_mutex_lock(self->catraca[particao_from]);
+        pthread_mutex_lock(self->mutex_escrita[particao_from]);
+        pthread_mutex_unlock(self->catraca[particao_from]);
+
+        pthread_mutex_lock(self->catraca[particao_to]);
+        pthread_mutex_lock(self->mutex_escrita[particao_to]);
+        pthread_mutex_unlock(self->catraca[particao_to]);
+    }else if(particao_from > particao_to){
+        pthread_mutex_lock(self->catraca[particao_to]);
+        pthread_mutex_lock(self->mutex_escrita[particao_to]);
+        pthread_mutex_unlock(self->catraca[particao_to]);
+        
+        pthread_mutex_lock(self->catraca[particao_from]);
+        pthread_mutex_lock(self->mutex_escrita[particao_from]);
+        pthread_mutex_unlock(self->catraca[particao_from]);
+    }else{
+        pthread_mutex_lock(self->catraca[particao_from]);
+        pthread_mutex_lock(self->mutex_escrita[particao_from]);
+        pthread_mutex_unlock(self->catraca[particao_from]);
+    }
+    
 }
 
 void db_release_pair(db_t *self, const char *from, const char *to)
 {
-    /* TODO: Implementar! */
+    unsigned int particao_from = db_partition_of(self, from);
+    unsigned int particao_to = db_partition_of(self, to);
+     if(particao_from < particao_to){
+        pthread_mutex_unlock(self->mutex_escrita[particao_from]); 
+        pthread_mutex_unlock(self->mutex_escrita[particao_to]);          
+    }else if(particao_from > particao_to){
+        pthread_mutex_unlock(self->mutex_escrita[particao_to]);       
+        pthread_mutex_unlock(self->mutex_escrita[particao_from]); 
+    }else{
+        pthread_mutex_unlock(self->mutex_escrita[particao_to]);
+    }
+
 }
 
 void db_snapshot_begin(db_t *self)
 {
-    /* TODO: Implementar! */
+    pthread_mutex_lock(&self->snapshot_pendente);
+
+    for(int i = 0; i < config.partitions; i++){
+        pthread_mutex_lock(self->mutex_leitores[i]);
+        (*self->readers[i])++;
+        if(*self->readers[i] == 1){
+            pthread_mutex_lock(self->mutex_escrita[i]);
+        }
+        pthread_mutex_unlock(self->mutex_leitores[i]);
+
+        
+    }
 }
 
 void db_snapshot_end(db_t *self)
 {
-    /* TODO: Implementar! */
+     for(int i = 0; i < config.partitions; i++){
+        pthread_mutex_lock(self->mutex_leitores[i]);
+        (*self->readers[i])--;
+        if(*self->readers[i] == 0){
+            pthread_mutex_unlock(self->mutex_escrita[i]);
+        }
+        pthread_mutex_unlock(self->mutex_leitores[i]);
+
+
+    }
+
+     pthread_mutex_unlock(&self->snapshot_pendente);
 }
 
 /* --------------------------------------------------------- */
